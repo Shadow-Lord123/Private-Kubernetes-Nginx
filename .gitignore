@@ -1,0 +1,6 @@
+.bash_history
+*.pem
+*.key
+*.secret
+.env
+*.local
