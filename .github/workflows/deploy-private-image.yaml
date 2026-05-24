@@ -9,80 +9,49 @@ on:
 
 env:
   K3S_SERVER_IP: ${{ secrets.K3S_SERVER_IP }}
-  DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-  DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-  DOCKERHUB_EMAIL: ${{ secrets.DOCKERHUB_EMAIL }}
 
 jobs:
   deploy:
-    name: Deploy to K3s
+    name: Deploy to K3s Cluster
     runs-on: ubuntu-latest
-
+    
     steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4
-
-      # -----------------------------
-      # Setup SSH
-      # -----------------------------
-      - name: Configure SSH
-        shell: bash
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.K3S_SSH_PRIVATE_KEY }}
-        run: |
-          set -e
-
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-
-          # Write SSH private key correctly
-          cat <<EOF > ~/.ssh/id_rsa
-          $SSH_PRIVATE_KEY
-          EOF
-
-          chmod 600 ~/.ssh/id_rsa
-
-          # Add server to known hosts
-          ssh-keyscan -H "$K3S_SERVER_IP" >> ~/.ssh/known_hosts
-
-          # Validate SSH key
-          ssh-keygen -y -f ~/.ssh/id_rsa > /dev/null
-
-      # -----------------------------
-      # Test SSH Connection
-      # -----------------------------
-      - name: Test SSH connection
-        run: |
-          ssh -o StrictHostKeyChecking=no \
-              -o ConnectTimeout=10 \
-              ubuntu@$K3S_SERVER_IP \
-              "echo '✅ SSH connection successful'"
-
-      # -----------------------------
-      # Deploy to K3s
-      # -----------------------------
-      - name: Deploy application
-        run: |
-          ssh ubuntu@$K3S_SERVER_IP << EOF
-            set -e
-
-            echo "=== Creating DockerHub secret ==="
-
+      
+      - name: Deploy to K3s
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.K3S_SERVER_IP }}
+          username: ubuntu
+          key: ${{ secrets.K3S_SSH_PRIVATE_KEY }}
+          script_stop: true
+          script: |
+            echo "========================================="
+            echo "Deploying Private Nginx to K3s Cluster"
+            echo "========================================="
+            
+            # Create Docker Hub pull secret
+            echo "Creating Docker Hub pull secret..."
             sudo k3s kubectl delete secret dockerhub-secret --ignore-not-found
-
             sudo k3s kubectl create secret docker-registry dockerhub-secret \
               --docker-server=https://index.docker.io/v1/ \
-              --docker-username="$DOCKERHUB_USERNAME" \
-              --docker-password="$DOCKERHUB_TOKEN" \
-              --docker-email="$DOCKERHUB_EMAIL"
-
-            echo "=== Deploying nginx ==="
-
-            cat <<DEPLOY | sudo k3s kubectl apply -f -
+              --docker-username=${{ secrets.DOCKERHUB_USERNAME }} \
+              --docker-password=${{ secrets.DOCKERHUB_TOKEN }} \
+              --docker-email=${{ secrets.DOCKERHUB_EMAIL }}
+            
+            # Verify secret was created
+            sudo k3s kubectl get secret dockerhub-secret
+            
+            # Deploy nginx from private registry
+            echo "Deploying nginx from private registry..."
+            cat <<'EOF' | sudo k3s kubectl apply -f -
             apiVersion: apps/v1
             kind: Deployment
             metadata:
               name: nginx-private-deployment
+              labels:
+                app: nginx-private
             spec:
               replicas: 2
               selector:
@@ -93,69 +62,63 @@ jobs:
                   labels:
                     app: nginx-private
                 spec:
-                  imagePullSecrets:
-                    - name: dockerhub-secret
-
                   containers:
-                    - name: nginx
-                      image: $DOCKERHUB_USERNAME/nginx-private:latest
-                      imagePullPolicy: Always
-
-                      ports:
-                        - containerPort: 80
-
-                      resources:
-                        requests:
-                          memory: "64Mi"
-                          cpu: "100m"
-                        limits:
-                          memory: "128Mi"
-                          cpu: "250m"
-
+                  - name: nginx
+                    image: ${{ secrets.DOCKERHUB_USERNAME }}/nginx-private:latest
+                    imagePullPolicy: Always
+                    ports:
+                    - containerPort: 80
+                      name: http
+                    resources:
+                      requests:
+                        memory: "64Mi"
+                        cpu: "50m"
+                      limits:
+                        memory: "128Mi"
+                        cpu: "100m"
+                  imagePullSecrets:
+                  - name: dockerhub-secret
             ---
             apiVersion: v1
             kind: Service
             metadata:
               name: nginx-private-service
+              labels:
+                app: nginx-private
             spec:
               type: NodePort
-
+              ports:
+              - port: 80
+                targetPort: 80
+                nodePort: 30080
+                protocol: TCP
+                name: http
               selector:
                 app: nginx-private
-
-              ports:
-                - protocol: TCP
-                  port: 80
-                  targetPort: 80
-                  nodePort: 30080
-            DEPLOY
-
-            echo ""
-            echo "=== Waiting for rollout ==="
-
+            EOF
+            
+            # Wait for deployment
+            echo "Waiting for deployment to be ready..."
             sudo k3s kubectl rollout status deployment/nginx-private-deployment --timeout=120s
-
+            
+            # Show status
             echo ""
-            echo "=== Pods ==="
-            sudo k3s kubectl get pods -l app=nginx-private
-
+            echo "========================================="
+            echo "Deployment Status"
+            echo "========================================="
             echo ""
-            echo "=== Services ==="
+            echo "Pods:"
+            sudo k3s kubectl get pods -l app=nginx-private -o wide
+            echo ""
+            echo "Services:"
             sudo k3s kubectl get svc nginx-private-service
-          EOF
-
-      # -----------------------------
-      # Verify Deployment
-      # -----------------------------
-      - name: Verify deployment
-        run: |
-          echo ""
-          echo "======================================"
-          echo "✅ Deployment Complete"
-          echo "======================================"
-          echo ""
-          echo "Application URL:"
-          echo "http://$K3S_SERVER_IP:30080"
-          echo ""
-
-          curl -I --max-time 10 http://$K3S_SERVER_IP:30080 || true
+            echo ""
+            echo "Deployment:"
+            sudo k3s kubectl get deployment nginx-private-deployment
+            echo ""
+            echo "========================================="
+            echo "✅ Deployment Complete!"
+            echo "========================================="
+            echo ""
+            NODE_PORT=$(sudo k3s kubectl get svc nginx-private-service -o jsonpath='{.spec.ports[0].nodePort}')
+            echo "Access nginx at: http://<WORKER-NODE-PUBLIC-IP>:${NODE_PORT}"
