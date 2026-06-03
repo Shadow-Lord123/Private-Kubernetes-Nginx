@@ -4,3 +4,12 @@
 *.secret
 .env
 *.local
+
+# Server/user home directory files (should never be committed)
+.bashrc
+.bash_logout
+.profile
+.ssh/
+.cache/
+.sudo_as_admin_successful
+snap/
