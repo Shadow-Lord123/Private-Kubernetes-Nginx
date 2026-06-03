@@ -36,11 +36,17 @@ spec:
             port: 80
           initialDelaySeconds: 15
           periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+          successThreshold: 1
         readinessProbe:
           httpGet:
             path: /
             port: 80
           initialDelaySeconds: 5
           periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+          successThreshold: 1
       imagePullSecrets:
       - name: dockerhub-secret
