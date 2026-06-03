@@ -10,23 +10,92 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
+      - name: Validate Kubernetes manifests
+        run: |
+          set -euo pipefail
+          for f in nginx-private-deployment.yaml nginx-private-service.yaml; do
+            if [ ! -f "$f" ]; then
+              echo "ERROR: Required manifest $f not found" >&2
+              exit 1
+            fi
+          done
+          echo "All required manifests present."
+
+      - name: Verify required secrets are set
+        run: |
+          set -euo pipefail
+          missing=()
+          for secret_name in K3S_SERVER_IP K3S_SSH_PRIVATE_KEY DOCKERHUB_USERNAME DOCKERHUB_TOKEN DOCKERHUB_EMAIL; do
+            eval val="\${$secret_name:-}"
+            if [ -z "$val" ]; then
+              missing+=("$secret_name")
+            fi
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "ERROR: Missing required secrets: ${missing[*]}" >&2
+            exit 1
+          fi
+          echo "All required secrets are configured."
+        env:
+          K3S_SERVER_IP: ${{ secrets.K3S_SERVER_IP }}
+          K3S_SSH_PRIVATE_KEY: ${{ secrets.K3S_SSH_PRIVATE_KEY }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DOCKERHUB_EMAIL: ${{ secrets.DOCKERHUB_EMAIL }}
+
       - name: Deploy to K3s
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.K3S_SERVER_IP }}
           username: ubuntu
           key: ${{ secrets.K3S_SSH_PRIVATE_KEY }}
+          script_stop: true
           script: |
+            set -euo pipefail
+
+            echo "==> Recreating Docker registry secret..."
             sudo k3s kubectl delete secret dockerhub-secret --ignore-not-found
             sudo k3s kubectl create secret docker-registry dockerhub-secret \
               --docker-server=https://index.docker.io/v1/ \
               --docker-username=${{ secrets.DOCKERHUB_USERNAME }} \
               --docker-password=${{ secrets.DOCKERHUB_TOKEN }} \
               --docker-email=${{ secrets.DOCKERHUB_EMAIL }}
-            
-            sudo k3s kubectl apply -f deploy.yaml
-            
-            sleep 5
-            sudo k3s kubectl get pods
-            sudo k3s kubectl get svc
+
+            echo "==> Verifying secret was created..."
+            sudo k3s kubectl get secret dockerhub-secret -o name
+            echo "Secret created successfully."
+
+            echo "==> Applying Kubernetes manifests..."
+            sudo k3s kubectl apply -f nginx-private-deployment.yaml -f nginx-private-service.yaml
+
+            echo "==> Waiting for deployment rollout..."
+            if ! sudo k3s kubectl rollout status deployment/nginx-private-deployment --timeout=120s; then
+              echo "ERROR: Deployment rollout failed. Dumping diagnostics:" >&2
+              sudo k3s kubectl describe deployment nginx-private-deployment >&2
+              sudo k3s kubectl get pods -l app=nginx-private -o wide >&2
+              sudo k3s kubectl logs -l app=nginx-private --tail=50 >&2 || true
+              exit 1
+            fi
+
+            echo "==> Verifying pods are running..."
+            READY_PODS=$(sudo k3s kubectl get pods -l app=nginx-private --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l)
+            if [ "$READY_PODS" -lt 1 ]; then
+              echo "ERROR: No running pods found for app=nginx-private" >&2
+              sudo k3s kubectl get pods -l app=nginx-private -o wide >&2
+              exit 1
+            fi
+            echo "$READY_PODS pod(s) running."
+
+            echo "==> Verifying service endpoint..."
+            ENDPOINTS=$(sudo k3s kubectl get endpoints nginx-private-service --no-headers 2>/dev/null | awk '{print $2}')
+            if [ "$ENDPOINTS" = "<none>" ] || [ -z "$ENDPOINTS" ]; then
+              echo "ERROR: Service nginx-private-service has no endpoints" >&2
+              sudo k3s kubectl describe svc nginx-private-service >&2
+              exit 1
+            fi
+            echo "Service has endpoints: $ENDPOINTS"
+
+            echo "==> Deployment completed successfully."
+            sudo k3s kubectl get pods -l app=nginx-private -o wide
+            sudo k3s kubectl get svc nginx-private-service
