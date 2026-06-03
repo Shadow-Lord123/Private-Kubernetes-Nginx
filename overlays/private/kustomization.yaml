@@ -1,0 +1,42 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+namePrefix: nginx-private-
+patches:
+  - target:
+      kind: Deployment
+      name: deployment
+    patch: |-
+      - op: replace
+        path: /metadata/labels/app
+        value: nginx-private
+      - op: add
+        path: /metadata/labels/environment
+        value: production
+      - op: replace
+        path: /spec/selector/matchLabels/app
+        value: nginx-private
+      - op: replace
+        path: /spec/template/metadata/labels/app
+        value: nginx-private
+      - op: replace
+        path: /spec/template/spec/containers/0/image
+        value: kritagyadockeruser/nginx-private:latest
+      - op: add
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Always
+      - op: add
+        path: /spec/template/spec/imagePullSecrets
+        value:
+          - name: dockerhub-secret
+  - target:
+      kind: Service
+      name: service
+    patch: |-
+      - op: replace
+        path: /metadata/labels/app
+        value: nginx-private
+      - op: replace
+        path: /spec/selector/app
+        value: nginx-private
